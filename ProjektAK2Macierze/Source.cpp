@@ -9,7 +9,7 @@
 using namespace std;
 
 const double eps = 1e-12; // sta³a przybli¿enia zera
-//test ms
+//test ms:)
 __global__ void addAndMulGauss(double *bj, const double *ai, const  double m)
 {
     int i = threadIdx.x;
