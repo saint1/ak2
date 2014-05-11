@@ -12,8 +12,8 @@ const double eps = 1e-12; // sta³a przybli¿enia zera
 //test ms:)
 __global__ void addAndMulGauss(double *bj, const double *ai, const  double m)
 {
-    int i = threadIdx.x;
-    bj[i] += m * ai[i];
+  //  int i = threadIdx.x;
+  //  bj[i] += m * ai[i];
 }
 
 
@@ -119,7 +119,7 @@ bool gauss(int n, double ** AB, double * X)
 // Program g³ówny
 //---------------
 
-int main1)
+int main1()
 {
 	clock_t start, koniec;
 	double **AB, *X;

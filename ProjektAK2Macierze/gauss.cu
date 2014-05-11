@@ -1,186 +1,229 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
-#include <iostream>
-#include <iomanip>
-#include <cmath>
+#include<conio.h>
+#include<stdlib.h>
+#include<stdio.h> 
+#include<math.h> 
+#include<cuda.h> 
+#include<iostream>
+#include <time.h>
+#define MAXBLOCKSIZE 512
 
-#include <stdio.h>
+clock_t start, koniec;
+
 using namespace std;
 
-const double eps = 1e-12; // sta³a przybli¿enia zera
+int Size;
+float *a, *b, *finalVec;
+float *m;
 
-__global__ void addAndMulGauss(double *bj, double *ai, double m)
+
+/*-------------------------------------------------------
+ ** Fan1() -- Calculate multiplier matrix
+ ** Pay attention to the index.  Index i give the range
+ ** which starts from 0 to range-1.  The real values of
+ ** the index should be adjust and related with the value
+ ** of t which is defined on the ForwardSub().
+ **-------------------------------------------------------
+ */
+__global__ void Fan1(float *m_cuda, float *a_cuda, int Size, int t)
+{   
+	//if(threadIdx.x + blockIdx.x * blockDim.x >= Size-1-t) printf(".");
+	//printf("blockIDx.x:%d,threadIdx.x:%d,Size:%d,t:%d,Size-1-t:%d\n",blockIdx.x,threadIdx.x,Size,t,Size-1-t);
+
+	if(threadIdx.x + blockIdx.x * blockDim.x >= Size-1-t) return;
+	*(m_cuda+Size*(blockDim.x*blockIdx.x+threadIdx.x+t+1)+t) = *(a_cuda+Size*(blockDim.x*blockIdx.x+threadIdx.x+t+1)+t) / *(a_cuda+Size*t+t);
+}
+
+/*-------------------------------------------------------
+ ** Fan2() -- Modify the matrix A into LUD
+ **-------------------------------------------------------
+ */ 
+
+__global__ void Fan2(float *m_cuda, float *a_cuda, float *b_cuda,int Size, int j1, int t)
 {
-    int i = threadIdx.x;
-    bj[i] += m * ai[i];
+	if(threadIdx.x + blockIdx.x * blockDim.x >= Size-1-t) return;
+	if(threadIdx.y + blockIdx.y * blockDim.y >= Size-t) return;
+
+	int xidx = blockIdx.x * blockDim.x + threadIdx.x;
+	int yidx = blockIdx.y * blockDim.y + threadIdx.y;
+	//printf("blockIdx.x:%d,threadIdx.x:%d,blockIdx.y:%d,threadIdx.y:%d,blockDim.x:%d,blockDim.y:%d\n",blockIdx.x,threadIdx.x,blockIdx.y,threadIdx.y,blockDim.x,blockDim.y);
+
+	a_cuda[Size*(xidx+1+t)+(yidx+t)] -= m_cuda[Size*(xidx+1+t)+t] * a_cuda[Size*t+(yidx+t)];
+	//a_cuda[xidx+1+t][yidx+t] -= m_cuda[xidx+1+t][t] * a_cuda[t][yidx+t];
+	if(yidx == 0){
+		//printf("blockIdx.x:%d,threadIdx.x:%d,blockIdx.y:%d,threadIdx.y:%d,blockDim.x:%d,blockDim.y:%d\n",blockIdx.x,threadIdx.x,blockIdx.y,threadIdx.y,blockDim.x,blockDim.y);
+		//printf("xidx:%d,yidx:%d\n",xidx,yidx);
+		b_cuda[xidx+1+t] -= m_cuda[Size*(xidx+1+t)+(yidx+t)] * b_cuda[t];
+	}
+}
+
+/*------------------------------------------------------
+ ** ForwardSub() -- Forward substitution of Gaussian
+ ** elimination.
+ **------------------------------------------------------
+ */
+void ForwardSub()
+{
+	int t;
+    float *m_cuda,*a_cuda,*b_cuda;
+
+	// allocate memory on GPU
+	cudaMalloc((void **) &m_cuda, Size * Size * sizeof(float));
+
+	cudaMalloc((void **) &a_cuda, Size * Size * sizeof(float));
+
+	cudaMalloc((void **) &b_cuda, Size * sizeof(float));	
+
+	// copy memory to GPU
+	cudaMemcpy(m_cuda, m, Size * Size * sizeof(float),cudaMemcpyHostToDevice );
+	cudaMemcpy(a_cuda, a, Size * Size * sizeof(float),cudaMemcpyHostToDevice );
+	cudaMemcpy(b_cuda, b, Size * sizeof(float),cudaMemcpyHostToDevice );
+
+	int block_size,grid_size;
+
+	block_size = MAXBLOCKSIZE;
+	grid_size = (Size/block_size) + (!(Size%block_size)? 0:1);
+	//printf("1d grid size: %d\n",grid_size);
+
+
+	dim3 dimBlock(block_size);
+	dim3 dimGrid(grid_size);
+	//dim3 dimGrid( (N/dimBlock.x) + (!(N%dimBlock.x)?0:1) );
+
+	int blockSize2d, gridSize2d;
+	blockSize2d = 4;
+	gridSize2d = (Size/blockSize2d) + (!(Size%blockSize2d?0:1)); 
+
+	dim3 dimBlockXY(blockSize2d,blockSize2d);
+	dim3 dimGridXY(gridSize2d,gridSize2d);
+
+    // begin timing kernels
+
+	for (t=0; t<(Size-1); t++) {
+		Fan1<<<dimGrid,dimBlock>>>(m_cuda,a_cuda,Size,t);
+		cudaThreadSynchronize();
+		Fan2<<<dimGridXY,dimBlockXY>>>(m_cuda,a_cuda,b_cuda,Size,Size-t,t);
+		cudaThreadSynchronize();
+
+	}
+
+
+	// copy memory back to CPU
+	cudaMemcpy(m, m_cuda, Size * Size * sizeof(float),cudaMemcpyDeviceToHost );
+	cudaMemcpy(a, a_cuda, Size * Size * sizeof(float),cudaMemcpyDeviceToHost );
+	cudaMemcpy(b, b_cuda, Size * sizeof(float),cudaMemcpyDeviceToHost );
+	cudaFree(m_cuda);
+	cudaFree(a_cuda);
+	cudaFree(b_cuda);
+}
+
+/*------------------------------------------------------
+ ** BackSub() -- Backward substitution
+ **------------------------------------------------------
+ */
+
+void BackSub()
+{
+	// create a new vector to hold the final answer
+	finalVec = (float *) malloc(Size * sizeof(float));
+	// solve "bottom up"
+	int i,j;
+	for(i=0;i<Size;i++){
+		finalVec[Size-i-1]=b[Size-i-1];
+		for(j=0;j<i;j++)
+		{
+			finalVec[Size-i-1]-=*(a+Size*(Size-i-1)+(Size-j-1)) * finalVec[Size-j-1];
+		}
+		finalVec[Size-i-1]=finalVec[Size-i-1]/ *(a+Size*(Size-i-1)+(Size-i-1));
+	}
 }
 
 
-// Funkcja realizuje algorytm eliminacji Gaussa
-//---------------------------------------------
-bool gaussWithCuda(int n, double ** AB, double * X,unsigned int size)
-{
+int main(int argc , char **argv) 
+{ 
 
-	int i,j,k;
-	double m,s;
-   
-	double *dev_ai = 0;
-	double *dev_bj = 0;
-	double dev_m = 0;
+    Size = 0; 
 
-	cudaError_t cudaStatus;
-
-	// Choose which GPU to run on, change this on a multi-GPU system.
-	cudaStatus = cudaSetDevice(0);
-
-	// Allocate GPU buffers for three vectors (two input, one output)    .
-	cudaStatus = cudaMalloc((void**)&dev_m, sizeof(double));
-
-	cudaStatus = cudaMalloc((void**)&dev_ai, size * sizeof(double));
-
-	cudaStatus = cudaMalloc((void**)&dev_bj, size * sizeof(double));
-	// eliminacja wspó³czynników
-
-	for(i = 0; i < n - 1; i++)
-	{
-		for(j = i + 1; j < n; j++)
-		{
-			if(fabs(AB[i][i]) < eps) return false;
-      
-			m = -AB[j][i] / AB[i][i];	
-      
-			cudaStatus = cudaMemcpy(dev_ai, AB[i], size * sizeof(double), cudaMemcpyHostToDevice);
-			cudaStatus = cudaMemcpy(dev_bj, AB[j], size * sizeof(double), cudaMemcpyHostToDevice);
-			cudaStatus = cudaMemcpy(&dev_m, &m, sizeof(double), cudaMemcpyHostToDevice);
-			
-		//	for(k = i + 1; k <= n; k++)
-        
-				//AB[j][k] += m * AB[i][k];	//zrownoleglenie		  
-			addAndMulGauss<<<1, size>>>(dev_bj, dev_ai, dev_m);
-			cudaStatus = cudaDeviceSynchronize();
-
-			// Copy output vector from GPU buffer to host memory.
-			cudaStatus = cudaMemcpy(AB[j], dev_bj, size * sizeof(double), cudaMemcpyDeviceToHost);
-
+	cin>>Size;
+	a = (float*)malloc(sizeof(float)*Size*(Size)); 
+	m = (float *) malloc(Size * Size * sizeof(float));
+	
+	for (int i=0; i<Size*Size; i++)
+			*(m+i) = 0.0;
+	for(int i =0 ; i< Size ;i++) 
+    { 
+        for(int j =0 ; j< Size; j++) 
+        { 		
+			a[i*Size+j] = (float)(rand()%50+1);
 		}
 	}
-	// wyliczanie niewiadomych
-
-	for(i = n - 1; i >= 0; i--)
-	{
-		s = AB[i][n];
-		for(j = n - 1; j >= i + 1; j--)
-			s -= AB[i][j] * X[j];
-		if(fabs(AB[i][i]) < eps) return false;
-		X[i] = s / AB[i][i]; //zrownoleglenia
+	b = (float *) malloc(Size * sizeof(float)); 
+	for (int i=0; i<Size; i++) {
+		b[i]= (float)(rand()%50+1);
 	}
-	return true;
-}
-// Funkcja realizuje algorytm eliminacji Gaussa
-//---------------------------------------------
-bool gauss(int n, double ** AB, double * X)
-{
+	cout<<"GPU"<<endl;
+	start = clock();
+	ForwardSub();
+	
+	koniec = clock(); 
+	long delta=(long)(koniec - start);
+	BackSub();
+	//for(int i =0 ; i< Size ;i++)         
+	//	printf("x%d = %f ",i,finalVec[i]);
+	cout<<endl;
+	cout<<"czas dzialania: "<<delta<<" [ms]"<<endl;
 
-  int i,j,k;
-  double m,s;
-
+	double **AB, *X;
+	int      n,i,j,k;
+	  
+  double m_,s;
+  AB = new double * [Size];
+	X  = new double [Size];
+	  cout<< endl<<endl<<"CPU\n";
+	for(i = 0; i < Size; i++) AB[i] = new double[Size + 1];
   // eliminacja wspó³czynników
-
-  for(i = 0; i < n - 1; i++)
+	start = clock();
+  for(i = 0; i < Size; i++){
+		for(j = 0; j < Size; j++) AB[i][j] = a[i*Size+j];
+		AB[i][Size] = b[i];
+  }
+  for(i = 0; i < Size - 1; i++)
   {
-    for(j = i + 1; j < n; j++)
+    for(j = i + 1; j < Size; j++)
     {
-      if(fabs(AB[i][i]) < eps) return false;
       
-	  m = -AB[j][i] / AB[i][i];	
+	  m_ = -AB[j][i] / AB[i][i];	
       
-	  for(k = i + 1; k <= n; k++)
+	  for(k = i + 1; k <= Size; k++)
         
-		  AB[j][k] += m * AB[i][k];	//zrownoleglenie
+		  AB[j][k] += m_ * AB[i][k];	
 		  
 
     }
   }
-
+    	koniec = clock(); 
+	delta=(long)(koniec - start);
   // wyliczanie niewiadomych
 
-  for(i = n - 1; i >= 0; i--)
+  for(i = Size - 1; i >= 0; i--)
   {
-    s = AB[i][n];
-    for(j = n - 1; j >= i + 1; j--)
-      s -= AB[i][j] * X[j];
-    if(fabs(AB[i][i]) < eps) return false;
+    s = AB[i][Size];
+    for(j = Size - 1; j >= i + 1; j--)
+      s -= AB[i][j] * X[j];   
     X[i] = s / AB[i][i];
   }
-  return true;
+
+    //for(i = 0; i < Size; i++)
+	//printf("x%d = %f ",i,X[i]);
+
+  	cout<<endl;
+	cout<<"czas dzialania: "<<delta<<" [ms]"<<endl;
+    free(m);
+    free(a);
+    free(b);
+	getchar();
+    _getch(); 
+    return 0; 
 }
-
-// Program g³ówny
-//---------------
-
-int main()
-{
-	clock_t start, koniec;
-	double **AB, *X;
-	int      n,i,j;
-
-	cout << setprecision(4) << fixed;
-  
-	// odczytujemy liczbê niewiadomych
-
-	cin >> n;
-
-	// tworzymy macierze AB i X
-
-	AB = new double * [n];
-	X  = new double [n];
-
-	for(i = 0; i < n; i++) AB[i] = new double[n + 1];
-
-	// odczytujemy dane dla macierzy AB
-
-	for(i = 0; i < n; i++)
-		for(j = 0; j <= n; j++) AB[i][j] = rand()%50+1;//cin >> AB[i][j];
-	
-	start = clock(); // bie¿¹cy czas systemowy w ms		
-
-	if(gauss(n,AB,X))
-	{
-		koniec = clock(); // bie¿¹cy czas systemowy w ms
-		long delta=(long)(koniec - start);//czas dzia³añ w ms
-		cout <<"czas wykonania: "<< delta << " ms\n";
-		/*for(i = 0; i < n; i++)
-		cout << "x" << i + 1 << " = " << setw(9) << X[i]
-		<< endl;	*/
-	}
-	else
-	cout << "DZIELNIK ZERO\n";
-
-	
-	for(i = 0; i < n; i++)
-		for(j = 0; j <= n; j++) AB[i][j] = rand()%50+1;//cin >> AB[i][j];
-	
-	start = clock(); // bie¿¹cy czas systemowy w ms		
-	if(gaussWithCuda(n,AB,X,n))
-	{
-		koniec = clock(); // bie¿¹cy czas systemowy w ms
-		long delta=(long)(koniec - start);//czas dzia³añ w ms
-		cout <<"czas wykonania: "<< delta << " ms\n";
-		/*for(i = 0; i < n; i++)
-		cout << "x" << i + 1 << " = " << setw(9) << X[i]
-		<< endl;	*/
-	}
-	else
-	cout << "DZIELNIK ZERO\n";
-
-
-	// usuwamy macierze z pamiêci
-
-	for(i = 0; i < n; i++) delete [] AB[i];
-		delete [] AB;	
-		delete [] X;
-		getchar();
-		getchar();
-		return 0;
-} 
